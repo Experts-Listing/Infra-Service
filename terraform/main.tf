@@ -120,9 +120,11 @@ resource "helm_release" "aws_load_balancer_controller" {
     { name = "region", value = var.aws_region },
     { name = "vpcId", value = module.vpc.vpc_id },
     { name = "serviceAccount.name", value = "aws-load-balancer-controller" },
+    # Only Ingress is used; the Service webhook would intercept every Service in the cluster.
+    { name = "enableServiceMutatorWebhook", value = "false" },
   ]
 
-  depends_on = [module.lb_controller_pod_identity]
+  depends_on = [module.eks, module.lb_controller_pod_identity]
 }
 
 resource "kubernetes_namespace_v1" "env" {
