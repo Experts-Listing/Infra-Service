@@ -226,3 +226,5 @@ To see what's running: `kubectl get deploy -n <env> -L app.kubernetes.io/version
 - In each app repo, set `AWS_REGION` and `AWS_ECR_PUSH_ROLE_ARN` from `terraform output ci_push_role_arns`.
 
 **Branch protection (recommended):** protect `main` here (PR plus review), and protect `dev`, `stage` and `prod` in the app repos (PR plus required CI checks, no force-push).
+
+k
