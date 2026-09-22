@@ -13,6 +13,22 @@ variable "github_org" {
   default = "Experts-Listing"
 }
 
+variable "github_org_id" {
+  description = "Numeric org ID; GitHub OIDC subjects use the immutable form repo:<org>@<org-id>/<repo>@<repo-id>"
+  type        = number
+  default     = 332406938
+}
+
+variable "github_repository_ids" {
+  type = map(number)
+  default = {
+    Expert-Listing-Frontend-Service       = 1381165194
+    Expert-Listing-Backend-Server-Service = 1381166435
+    Expert-Listing-Geo-Bucket             = 1381206904
+    Infra-Service                         = 1381167448
+  }
+}
+
 variable "infra_repository" {
   type    = string
   default = "Infra-Service"

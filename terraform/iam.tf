@@ -1,3 +1,7 @@
+locals {
+  github_sub_prefix = { for repo, id in var.github_repository_ids : repo => "repo:${var.github_org}@${var.github_org_id}/${repo}@${id}" }
+}
+
 resource "aws_iam_openid_connect_provider" "github" {
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
@@ -24,7 +28,7 @@ data "aws_iam_policy_document" "ci_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = [for env in var.environments : "repo:${var.github_org}/${each.value}:ref:refs/heads/${env}"]
+      values   = [for env in var.environments : "${local.github_sub_prefix[each.value]}:ref:refs/heads/${env}"]
     }
   }
 }
@@ -85,7 +89,7 @@ data "aws_iam_policy_document" "cd_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = [for env in var.environments : "repo:${var.github_org}/${var.infra_repository}:environment:${env}"]
+      values   = [for env in var.environments : "${local.github_sub_prefix[var.infra_repository]}:environment:${env}"]
     }
   }
 }

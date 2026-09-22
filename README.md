@@ -64,10 +64,10 @@ One root module in `terraform/` provisions:
 
 | Role | Trusted by (OIDC `sub`) | Can do |
 |---|---|---|
-| `expert-listing-ci-<service>` | `repo:Experts-Listing/<app-repo>:ref:refs/heads/{dev,stage,prod}` | Push to **its own** ECR repository only |
-| `expert-listing-cd` | `repo:Experts-Listing/Infra-Service:environment:{dev,stage,prod}` | `eks:DescribeCluster`, `ecr:DescribeImages`, plus an EKS access entry with `AmazonEKSEditPolicy` scoped to the `dev`/`stage`/`prod` namespaces only (not cluster admin) |
+| `expert-listing-ci-<service>` | `repo:Experts-Listing@<org-id>/<app-repo>@<repo-id>:ref:refs/heads/{dev,stage,prod}` | Push to **its own** ECR repository only |
+| `expert-listing-cd` | `repo:Experts-Listing@<org-id>/Infra-Service@<repo-id>:environment:{dev,stage,prod}` | `eks:DescribeCluster`, `ecr:DescribeImages`, plus an EKS access entry with `AmazonEKSEditPolicy` scoped to the `dev`/`stage`/`prod` namespaces only (not cluster admin) |
 
-Pull requests can't assume the CI roles, and only jobs running in a GitHub Environment of this repo can assume the CD role.
+Pull requests can't assume the CI roles, and only jobs running in a GitHub Environment of this repo can assume the CD role. GitHub issues these repos immutable OIDC subjects that include the numeric org and repo IDs (`github_org_id`, `github_repository_ids`), so a deleted and recreated repo with the same name cannot assume the roles.
 
 - **CloudWatch alarms** (node CPU > 80%, node memory > 80%, failed nodes) go to an SNS topic. Set `alarm_email` to subscribe.
 
