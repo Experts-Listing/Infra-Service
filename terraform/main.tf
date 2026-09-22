@@ -52,6 +52,7 @@ module "eks" {
     coredns        = {}
     metrics-server = {}
     amazon-cloudwatch-observability = {
+      resolve_conflicts_on_create = "OVERWRITE"
       pod_identity_association = [{
         role_arn        = module.cloudwatch_pod_identity.iam_role_arn
         service_account = "cloudwatch-agent"
