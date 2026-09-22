@@ -1,0 +1,39 @@
+global:
+  environment: prod
+
+frontend:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+  autoscaling:
+    minReplicas: 3
+    maxReplicas: 8
+
+backend:
+  env:
+    LOG_LEVEL: warn
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  autoscaling:
+    minReplicas: 3
+    maxReplicas: 8
+
+geoBucket:
+  env:
+    LOG_LEVEL: warn
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  autoscaling:
+    minReplicas: 3
+    maxReplicas: 8

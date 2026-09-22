@@ -1,0 +1,20 @@
+{{- with .Values.frontend }}
+{{- if .image.tag }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  labels:
+    {{- include "expert-listing.labels" (dict "root" $ "component" "frontend") | nindent 4 }}
+  annotations:
+    alb.ingress.kubernetes.io/healthcheck-path: {{ .probes.readiness }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "expert-listing.selectorLabels" (dict "root" $ "component" "frontend") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- end }}
+{{- end }}

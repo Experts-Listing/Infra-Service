@@ -1,0 +1,277 @@
+name: CD
+
+on:
+  repository_dispatch:
+    types: [deploy]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Service to deploy
+        type: choice
+        options: [frontend, backend, geo-bucket]
+      environment:
+        description: Target environment
+        type: choice
+        options: [dev, stage, prod]
+      tag:
+        description: Full git SHA of an image already in ECR (redeploy / rollback)
+        type: string
+        required: true
+
+run-name: Deploy ${{ github.event.client_payload.service || inputs.service }} to ${{ github.event.client_payload.environment || inputs.environment }}
+
+permissions:
+  contents: read
+
+env:
+  HELM_VERSION: v4.3.0
+  RELEASE: expert-listing
+  CHART: helm/expert-listing
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    outputs:
+      service: ${{ steps.payload.outputs.service }}
+      values_key: ${{ steps.payload.outputs.values_key }}
+      environment: ${{ steps.payload.outputs.environment }}
+      ecr_repository: ${{ steps.payload.outputs.ecr_repository }}
+      tag: ${{ steps.payload.outputs.tag }}
+      source: ${{ steps.payload.outputs.source }}
+      source_run_url: ${{ steps.payload.outputs.source_run_url }}
+    steps:
+      - name: Validate deploy request
+        id: payload
+        env:
+          SERVICE: ${{ github.event.client_payload.service || inputs.service }}
+          ENVIRONMENT: ${{ github.event.client_payload.environment || inputs.environment }}
+          TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+          COMMIT: ${{ github.event.client_payload.commit || inputs.tag }}
+          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
+          SOURCE_REPOSITORY: ${{ github.event.client_payload.source_repository }}
+          SOURCE_RUN_URL: ${{ github.event.client_payload.source_run_url }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; echo "### Deploy request rejected: $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+
+          case "$SERVICE" in
+            frontend)   values_key=frontend;  app_repo=Expert-Listing-Frontend-Service ;;
+            backend)    values_key=backend;   app_repo=Expert-Listing-Backend-Server-Service ;;
+            geo-bucket) values_key=geoBucket; app_repo=Expert-Listing-Geo-Bucket ;;
+            *) fail "unknown service" ;;
+          esac
+          case "$ENVIRONMENT" in dev|stage|prod) ;; *) fail "unknown environment" ;; esac
+          [[ "$TAG" =~ ^[0-9a-f]{40}$ ]] || fail "tag must be a full 40-character git SHA"
+          [ "$COMMIT" = "$TAG" ] || fail "commit and tag must match"
+
+          ecr_repository="expert-listing/$SERVICE"
+          if [ "$GITHUB_EVENT_NAME" = "repository_dispatch" ]; then
+            [ "$SOURCE_REPOSITORY" = "$GITHUB_REPOSITORY_OWNER/$app_repo" ] || fail "source_repository does not match service"
+            [ "$PAYLOAD_REPOSITORY" = "$ecr_repository" ] || fail "image repository does not match service"
+            source="$SOURCE_REPOSITORY"
+          else
+            source="manual by $GITHUB_ACTOR"
+            SOURCE_RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
+
+          {
+            echo "service=$SERVICE"
+            echo "values_key=$values_key"
+            echo "environment=$ENVIRONMENT"
+            echo "ecr_repository=$ecr_repository"
+            echo "tag=$TAG"
+            echo "source=$source"
+            echo "source_run_url=$SOURCE_RUN_URL"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Notify deploy requested
+        if: env.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
+        with:
+          webhook: ${{ env.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: ":hourglass_flowing_sand: Deploy requested: *${{ steps.payload.outputs.service }}* `${{ steps.payload.outputs.tag }}` → *${{ steps.payload.outputs.environment }}*${{ steps.payload.outputs.environment == 'prod' && ' (awaiting approval if reviewers are required)' || '' }} · <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|CD run>"
+
+  deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: ${{ needs.validate.outputs.environment }}
+    concurrency:
+      group: deploy-${{ needs.validate.outputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.deploy.outputs.image }}
+      previous_image: ${{ steps.deploy.outputs.previous_image }}
+      revision: ${{ steps.verify.outputs.revision }}
+      ready: ${{ steps.verify.outputs.ready }}
+    env:
+      SERVICE: ${{ needs.validate.outputs.service }}
+      VALUES_KEY: ${{ needs.validate.outputs.values_key }}
+      ENVIRONMENT: ${{ needs.validate.outputs.environment }}
+      ECR_REPOSITORY: ${{ needs.validate.outputs.ecr_repository }}
+      TAG: ${{ needs.validate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_CD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Check image exists in ECR
+        run: |
+          aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$TAG" \
+            --query 'imageDetails[0].{digest: imageDigest, pushedAt: imagePushedAt}' --output table
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Connect to EKS
+        env:
+          CLUSTER: ${{ vars.EKS_CLUSTER_NAME }}
+        run: aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+
+      - name: Helm upgrade
+        id: deploy
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          registry="$account.dkr.ecr.$AWS_REGION.amazonaws.com"
+          image="$registry/$ECR_REPOSITORY:$TAG"
+
+          # Keep every other service on the exact SHA it is running now; only the target changes.
+          current=$(helm get values "$RELEASE" -n "$ENVIRONMENT" -o json 2>/dev/null || echo '{}')
+          [ "$current" = "null" ] && current='{}'
+          keep=()
+          for key in frontend backend geoBucket; do
+            [ "$key" = "$VALUES_KEY" ] && continue
+            tag=$(jq -r --arg k "$key" '.[$k].image.tag // empty' <<<"$current")
+            [ -n "$tag" ] && keep+=(--set "$key.image.tag=$tag")
+          done
+          previous=$(jq -r --arg k "$VALUES_KEY" '.[$k].image.tag // empty' <<<"$current")
+          previous_image="${previous:+$registry/$ECR_REPOSITORY:$previous}"
+
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "previous_image=${previous_image:-none}" >> "$GITHUB_OUTPUT"
+
+          helm upgrade --install "$RELEASE" "$CHART" \
+            --namespace "$ENVIRONMENT" \
+            -f "$CHART/values-$ENVIRONMENT.yaml" \
+            --set global.imageRegistry="$registry" \
+            --set "$VALUES_KEY.image.tag=$TAG" \
+            "${keep[@]}" \
+            --description "$SERVICE=$TAG" \
+            --rollback-on-failure \
+            --wait \
+            --timeout 10m \
+            --history-max 15
+
+      - name: Verify rollout
+        id: verify
+        env:
+          EXPECTED_IMAGE: ${{ steps.deploy.outputs.image }}
+        run: |
+          set -euo pipefail
+          kubectl rollout status "deployment/$SERVICE" -n "$ENVIRONMENT" --timeout=5m
+
+          running=$(kubectl get deployment "$SERVICE" -n "$ENVIRONMENT" -o jsonpath='{.spec.template.spec.containers[0].image}')
+          if [ "$running" != "$EXPECTED_IMAGE" ]; then
+            echo "::error::Deployment runs $running, expected $EXPECTED_IMAGE"
+            exit 1
+          fi
+
+          read -r desired updated available <<<"$(kubectl get deployment "$SERVICE" -n "$ENVIRONMENT" \
+            -o jsonpath='{.status.replicas} {.status.updatedReplicas} {.status.availableReplicas}')"
+          if [ "$updated" != "$desired" ] || [ "$available" != "$desired" ]; then
+            echo "::error::Only $available/$desired replicas available ($updated updated)"
+            exit 1
+          fi
+
+          kubectl get deployment,hpa,pods -n "$ENVIRONMENT" -l "app.kubernetes.io/name=$SERVICE" -o wide
+          echo "ready=$available/$desired" >> "$GITHUB_OUTPUT"
+          echo "revision=$(helm history "$RELEASE" -n "$ENVIRONMENT" -o json | jq -r 'last.revision')" >> "$GITHUB_OUTPUT"
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get deployment,replicaset,pods,hpa -n "$ENVIRONMENT" -l "app.kubernetes.io/name=$SERVICE" -o wide || true
+          kubectl describe deployment "$SERVICE" -n "$ENVIRONMENT" || true
+          kubectl describe pods -n "$ENVIRONMENT" -l "app.kubernetes.io/name=$SERVICE" | tail -n 80 || true
+          kubectl get events -n "$ENVIRONMENT" --sort-by=.lastTimestamp | tail -n 40 || true
+          kubectl logs -n "$ENVIRONMENT" -l "app.kubernetes.io/name=$SERVICE" --all-containers --prefix --tail=100 || true
+          helm history "$RELEASE" -n "$ENVIRONMENT" --max 5 || true
+
+      - name: Summary
+        if: always()
+        env:
+          IMAGE: ${{ steps.deploy.outputs.image }}
+          PREVIOUS_IMAGE: ${{ steps.deploy.outputs.previous_image }}
+          SOURCE: ${{ needs.validate.outputs.source }}
+          SOURCE_RUN_URL: ${{ needs.validate.outputs.source_run_url }}
+          STATUS: ${{ job.status }}
+          REVISION: ${{ steps.verify.outputs.revision }}
+        run: |
+          {
+            echo "### Deploy $SERVICE → $ENVIRONMENT: $STATUS"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commit | \`$TAG\` |"
+            echo "| New image | \`${IMAGE:-n/a}\` |"
+            echo "| Previous image | \`${PREVIOUS_IMAGE:-n/a}\` |"
+            echo "| Helm revision | ${REVISION:-n/a} |"
+            echo "| Source | $SOURCE ([run]($SOURCE_RUN_URL)) |"
+            echo
+            echo "Rollback: run this workflow manually with the previous SHA, or \`helm rollback $RELEASE <revision> -n $ENVIRONMENT\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  notify:
+    needs: [validate, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      VALIDATE_RESULT: ${{ needs.validate.result }}
+      DEPLOY_RESULT: ${{ needs.deploy.result }}
+      SERVICE: ${{ needs.validate.outputs.service }}
+      ENVIRONMENT: ${{ needs.validate.outputs.environment }}
+      TAG: ${{ needs.validate.outputs.tag }}
+      SOURCE: ${{ needs.validate.outputs.source }}
+      IMAGE: ${{ needs.deploy.outputs.image }}
+      PREVIOUS_IMAGE: ${{ needs.deploy.outputs.previous_image }}
+      REVISION: ${{ needs.deploy.outputs.revision }}
+      READY: ${{ needs.deploy.outputs.ready }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Build Slack message
+        id: message
+        run: |
+          if [ "$VALIDATE_RESULT" = "failure" ]; then
+            text=":no_entry: Deploy request rejected by validation ($GITHUB_EVENT_NAME) · <$RUN_URL|CD run>"
+          elif [ "$DEPLOY_RESULT" = "success" ]; then
+            text=":white_check_mark: Deployed *$SERVICE* to *$ENVIRONMENT* ($READY ready, Helm rev $REVISION)"$'\n'"Image: \`$IMAGE\`"$'\n'"Previous: \`$PREVIOUS_IMAGE\`"$'\n'"Source: $SOURCE · <$RUN_URL|CD run>"
+          elif [ "$DEPLOY_RESULT" = "failure" ]; then
+            text=":x: Deploy of *$SERVICE* \`${TAG::7}\` to *$ENVIRONMENT* FAILED. Helm rolled back; still live: \`${PREVIOUS_IMAGE:-none}\`"$'\n'"Source: $SOURCE · <$RUN_URL|Diagnostics>"
+          elif [ "$DEPLOY_RESULT" = "cancelled" ]; then
+            text=":warning: Deploy of *$SERVICE* \`${TAG::7}\` to *$ENVIRONMENT* was cancelled or rejected · <$RUN_URL|CD run>"
+          else
+            echo "send=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          jq -n --arg text "$text" '{text: $text}' > slack.json
+          echo "send=true" >> "$GITHUB_OUTPUT"
+
+      - name: Send to Slack
+        if: steps.message.outputs.send == 'true' && env.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
+        with:
+          webhook: ${{ env.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload-file-path: slack.json

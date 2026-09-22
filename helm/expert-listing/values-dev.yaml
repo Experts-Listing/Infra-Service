@@ -1,0 +1,10 @@
+global:
+  environment: dev
+
+backend:
+  env:
+    LOG_LEVEL: debug
+
+geoBucket:
+  env:
+    LOG_LEVEL: debug

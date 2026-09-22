@@ -1,0 +1,17 @@
+global:
+  environment: stage
+
+frontend:
+  autoscaling:
+    minReplicas: 2
+    maxReplicas: 4
+
+backend:
+  autoscaling:
+    minReplicas: 2
+    maxReplicas: 4
+
+geoBucket:
+  autoscaling:
+    minReplicas: 2
+    maxReplicas: 4

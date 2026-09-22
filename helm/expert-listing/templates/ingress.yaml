@@ -1,0 +1,32 @@
+{{- $services := list (dict "name" "backend" "values" .Values.backend) (dict "name" "geo-bucket" "values" .Values.geoBucket) (dict "name" "frontend" "values" .Values.frontend) }}
+{{- $active := list }}
+{{- range $services }}{{ if .values.image.tag }}{{ $active = append $active . }}{{ end }}{{ end }}
+{{- if and .Values.ingress.enabled $active }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: expert-listing
+  labels:
+    {{- include "expert-listing.labels" (dict "root" $ "component" "ingress") | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - http:
+        paths:
+          {{- range $active }}
+          - path: {{ .values.ingressPath }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .name }}
+                port:
+                  name: http
+          {{- end }}
+      {{- with .Values.ingress.host }}
+      host: {{ . }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,88 @@
+global:
+  environment: ""
+  imageRegistry: ""
+
+ingress:
+  enabled: true
+  className: alb
+  host: ""
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+
+frontend:
+  image:
+    repository: expert-listing/frontend
+    tag: ""
+  commit: ""
+  sourceRepository: Experts-Listing/Expert-Listing-Frontend-Service
+  containerPort: 8080
+  ingressPath: /
+  env: {}
+  existingSecret: ""
+  probes:
+    liveness: /healthz
+    readiness: /healthz
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+  autoscaling:
+    minReplicas: 1
+    maxReplicas: 2
+    targetCPUUtilization: 70
+    targetMemoryUtilization: 80
+
+backend:
+  image:
+    repository: expert-listing/backend
+    tag: ""
+  commit: ""
+  sourceRepository: Experts-Listing/Expert-Listing-Backend-Server-Service
+  containerPort: 3000
+  ingressPath: /api/experts
+  env:
+    LOG_LEVEL: info
+  existingSecret: ""
+  probes:
+    liveness: /healthz
+    readiness: /readyz
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      memory: 192Mi
+  autoscaling:
+    minReplicas: 1
+    maxReplicas: 2
+    targetCPUUtilization: 70
+    targetMemoryUtilization: 80
+
+geoBucket:
+  image:
+    repository: expert-listing/geo-bucket
+    tag: ""
+  commit: ""
+  sourceRepository: Experts-Listing/Expert-Listing-Geo-Bucket
+  containerPort: 3000
+  ingressPath: /api/geo
+  env:
+    LOG_LEVEL: info
+  existingSecret: ""
+  probes:
+    liveness: /healthz
+    readiness: /readyz
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      memory: 192Mi
+  autoscaling:
+    minReplicas: 1
+    maxReplicas: 2
+    targetCPUUtilization: 70
+    targetMemoryUtilization: 80
