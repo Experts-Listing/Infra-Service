@@ -25,7 +25,6 @@ permissions:
 
 env:
   HELM_VERSION: v4.3.0
-  RELEASE: expert-listing
   CHART: helm/expert-listing
 
 jobs:
@@ -100,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ needs.validate.outputs.environment }}
     concurrency:
-      group: deploy-${{ needs.validate.outputs.environment }}
+      group: deploy-${{ needs.validate.outputs.environment }}-${{ needs.validate.outputs.service }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -147,27 +146,18 @@ jobs:
           registry="$account.dkr.ecr.$AWS_REGION.amazonaws.com"
           image="$registry/$ECR_REPOSITORY:$TAG"
 
-          # Keep every other service on the exact SHA it is running now; only the target changes.
-          current=$(helm get values "$RELEASE" -n "$ENVIRONMENT" -o json 2>/dev/null || echo '{}')
-          [ "$current" = "null" ] && current='{}'
-          keep=()
-          for key in frontend backend geoBucket; do
-            [ "$key" = "$VALUES_KEY" ] && continue
-            tag=$(jq -r --arg k "$key" '.[$k].image.tag // empty' <<<"$current")
-            [ -n "$tag" ] && keep+=(--set "$key.image.tag=$tag")
-          done
-          previous=$(jq -r --arg k "$VALUES_KEY" '.[$k].image.tag // empty' <<<"$current")
+          current=$(helm get values "$SERVICE" -n "$ENVIRONMENT" -o json 2>/dev/null || echo '{}')
+          previous=$(jq -r --arg k "$VALUES_KEY" '(. // {})[$k].image.tag // empty' <<<"$current")
           previous_image="${previous:+$registry/$ECR_REPOSITORY:$previous}"
 
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "previous_image=${previous_image:-none}" >> "$GITHUB_OUTPUT"
 
-          helm upgrade --install "$RELEASE" "$CHART" \
+          helm upgrade --install "$SERVICE" "$CHART" \
             --namespace "$ENVIRONMENT" \
             -f "$CHART/values-$ENVIRONMENT.yaml" \
             --set global.imageRegistry="$registry" \
             --set "$VALUES_KEY.image.tag=$TAG" \
-            "${keep[@]}" \
             --description "$SERVICE=$TAG" \
             --rollback-on-failure \
             --wait \
@@ -197,7 +187,7 @@ jobs:
 
           kubectl get deployment,hpa,pods -n "$ENVIRONMENT" -l "app.kubernetes.io/name=$SERVICE" -o wide
           echo "ready=$available/$desired" >> "$GITHUB_OUTPUT"
-          echo "revision=$(helm history "$RELEASE" -n "$ENVIRONMENT" -o json | jq -r 'last.revision')" >> "$GITHUB_OUTPUT"
+          echo "revision=$(helm history "$SERVICE" -n "$ENVIRONMENT" -o json | jq -r 'last.revision')" >> "$GITHUB_OUTPUT"
 
       - name: Diagnostics
         if: failure()
@@ -207,7 +197,7 @@ jobs:
           kubectl describe pods -n "$ENVIRONMENT" -l "app.kubernetes.io/name=$SERVICE" | tail -n 80 || true
           kubectl get events -n "$ENVIRONMENT" --sort-by=.lastTimestamp | tail -n 40 || true
           kubectl logs -n "$ENVIRONMENT" -l "app.kubernetes.io/name=$SERVICE" --all-containers --prefix --tail=100 || true
-          helm history "$RELEASE" -n "$ENVIRONMENT" --max 5 || true
+          helm history "$SERVICE" -n "$ENVIRONMENT" --max 5 || true
 
       - name: Summary
         if: always()
@@ -229,7 +219,7 @@ jobs:
             echo "| Helm revision | ${REVISION:-n/a} |"
             echo "| Source | $SOURCE ([run]($SOURCE_RUN_URL)) |"
             echo
-            echo "Rollback: run this workflow manually with the previous SHA, or \`helm rollback $RELEASE <revision> -n $ENVIRONMENT\`."
+            echo "Rollback: run this workflow manually with the previous SHA, or \`helm rollback $SERVICE <revision> -n $ENVIRONMENT\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
   notify:

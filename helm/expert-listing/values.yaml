@@ -18,6 +18,7 @@ frontend:
   sourceRepository: Experts-Listing/Expert-Listing-Frontend-Service
   containerPort: 8080
   ingressPath: /
+  ingressOrder: 100
   env: {}
   existingSecret: ""
   probes:
@@ -43,6 +44,7 @@ backend:
   sourceRepository: Experts-Listing/Expert-Listing-Backend-Server-Service
   containerPort: 3000
   ingressPath: /api/experts
+  ingressOrder: 10
   env:
     LOG_LEVEL: info
   existingSecret: ""
@@ -69,6 +71,7 @@ geoBucket:
   sourceRepository: Experts-Listing/Expert-Listing-Geo-Bucket
   containerPort: 3000
   ingressPath: /api/geo
+  ingressOrder: 20
   env:
     LOG_LEVEL: info
   existingSecret: ""

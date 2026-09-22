@@ -1,23 +1,25 @@
 {{- $services := list (dict "name" "backend" "values" .Values.backend) (dict "name" "geo-bucket" "values" .Values.geoBucket) (dict "name" "frontend" "values" .Values.frontend) }}
-{{- $active := list }}
-{{- range $services }}{{ if .values.image.tag }}{{ $active = append $active . }}{{ end }}{{ end }}
-{{- if and .Values.ingress.enabled $active }}
+{{- range $services }}
+{{- if and $.Values.ingress.enabled .values.image.tag }}
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: expert-listing
+  name: {{ .name }}
   labels:
-    {{- include "expert-listing.labels" (dict "root" $ "component" "ingress") | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+    {{- include "expert-listing.labels" (dict "root" $ "component" .name) | nindent 4 }}
   annotations:
+    # All services in an environment share one ALB; lower order wins, so the frontend's "/" catch-all goes last.
+    alb.ingress.kubernetes.io/group.name: expert-listing-{{ $.Values.global.environment }}
+    alb.ingress.kubernetes.io/group.order: {{ .values.ingressOrder | quote }}
+    {{- with $.Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 spec:
-  ingressClassName: {{ .Values.ingress.className }}
+  ingressClassName: {{ $.Values.ingress.className }}
   rules:
     - http:
         paths:
-          {{- range $active }}
           - path: {{ .values.ingressPath }}
             pathType: Prefix
             backend:
@@ -25,8 +27,8 @@ spec:
                 name: {{ .name }}
                 port:
                   name: http
-          {{- end }}
-      {{- with .Values.ingress.host }}
+      {{- with $.Values.ingress.host }}
       host: {{ . }}
       {{- end }}
+{{- end }}
 {{- end }}

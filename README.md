@@ -46,7 +46,7 @@ flowchart TD
 ```
 .github/workflows/cd.yml     deployment workflow
 terraform/                   one root module for all AWS infrastructure
-helm/expert-listing/         one chart: a Deployment, Service and HPA file per service, plus one Ingress
+helm/expert-listing/         one chart: Deployment, Service and HPA files per service, plus Ingress
   values.yaml                service defaults (ports, probes, resources, ECR repo names)
   values-{dev,stage,prod}.yaml   environment overrides (HPA range, resources, log level)
 ```
@@ -57,7 +57,7 @@ One root module in `terraform/` provisions:
 
 - **VPC** across 3 AZs, with public subnets for the ALB and private subnets for nodes, and a single NAT gateway to keep cost down (use one per AZ for full production HA).
 - **EKS** (`terraform-aws-modules/eks`) with a managed node group (c7i-flex.large, 2–4 nodes), control-plane API/audit/authenticator logs, and add-ons: VPC CNI, CoreDNS, kube-proxy, Pod Identity agent, **metrics-server** (needed by HPA) and **Amazon CloudWatch Observability** (Container Insights metrics and container logs).
-- **AWS Load Balancer Controller** (Helm release + Pod Identity role), which turns the chart's Ingress into an ALB.
+- **AWS Load Balancer Controller** (Helm release + Pod Identity role), which merges each environment's Ingresses into one ALB.
 - **Namespaces** `dev`, `stage` and `prod`.
 - **ECR** repositories `expert-listing/{frontend,backend,geo-bucket}` with **immutable tags**, scan-on-push and a lifecycle policy that keeps the last 50 images for rollback.
 - **GitHub OIDC** provider and two kinds of roles, with no long-lived AWS keys anywhere:
@@ -91,14 +91,15 @@ State is stored in S3 with native lockfile locking (`use_lockfile`). The applyin
 
 ## Helm
 
-`helm/expert-listing` is one chart installed as **one release per environment** (release `expert-listing` in namespace `dev`, `stage` or `prod`). Each service has its own manifests:
+`helm/expert-listing` is one chart installed as **one release per service per environment** (releases `frontend`, `backend`, `geo-bucket` in namespace `dev`, `stage` or `prod`). A release renders only the service whose tag is set, so services deploy and roll back independently. Each service has its own manifests:
 
 ```
 templates/
   frontend-deployment.yaml   frontend-service.yaml   frontend-hpa.yaml
   backend-deployment.yaml    backend-service.yaml    backend-hpa.yaml
   geo-bucket-deployment.yaml geo-bucket-service.yaml geo-bucket-hpa.yaml
-  ingress.yaml               /api/experts → backend, /api/geo → geo-bucket, / → frontend
+  ingress.yaml               one Ingress per service, joined into one ALB per env via group.name
+                             order: /api/experts → backend (10), /api/geo → geo-bucket (20), / → frontend (100)
 ```
 
 - **Immutable images only.** A service is rendered only when `<service>.image.tag` is set, the chart has no default tag, `latest` is rejected, and `global.imageRegistry` is required. CD supplies all of these.
@@ -151,7 +152,7 @@ Steps:
 3. **Authenticate**: OIDC into `expert-listing-cd`, then `aws eks update-kubeconfig`.
 4. **Check the image**: it must already exist in ECR (`describe-images`).
 5. **Deploy**:
-   - Run `helm upgrade --install expert-listing` in the env namespace with `values-<env>.yaml`, the new SHA for the target service, and the **currently running SHAs** of the other services (read with `helm get values`), so only one service changes.
+   - Run `helm upgrade --install <service>` in the env namespace with `values-<env>.yaml` and the new SHA. Other services are separate releases and are untouched.
    - Flags: `--rollback-on-failure --wait --timeout 10m`, keeping the last 15 revisions.
 6. **Verify**:
    - `kubectl rollout status`.
@@ -164,7 +165,7 @@ Steps:
    - On failure it also dumps describe output, events, pod logs and Helm history.
    - Slack gets a message when a deploy is requested, succeeds, fails (auto-rolled back), is rejected or is cancelled.
 
-Deploys to the same environment are serialized (`concurrency: deploy-<env>`), and nothing in progress is cancelled.
+Deploys of the same service to the same environment are serialized (`concurrency: deploy-<env>-<service>`). Different services deploy in parallel, so a burst of merges across repos never drops a deploy.
 
 ## Promotion
 
@@ -182,10 +183,10 @@ Merging into an app repo's `dev`, `stage` or `prod` branch deploys to the enviro
 Every image is kept in ECR under its git SHA, so a rollback never rebuilds anything.
 
 - **Preferred:** Actions → CD → *Run workflow*, choose the service and environment, and enter the previous SHA. It goes through the same validation, approval and verification as any deploy. The previous image is listed in the last deploy's job summary and Slack message.
-- **Break-glass:** revert the whole environment release to an earlier revision.
+- **Break-glass:** revert one service release to an earlier revision.
   ```bash
-  helm history expert-listing -n prod        # the description column shows <service>=<sha>
-  helm rollback expert-listing <revision> -n prod --wait
+  helm history backend -n prod        # the description column shows <service>=<sha>
+  helm rollback backend <revision> -n prod --wait
   ```
 - **Automatic:** a deploy that fails to become healthy is rolled back by `--rollback-on-failure`.
 
